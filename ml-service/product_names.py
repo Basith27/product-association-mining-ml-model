@@ -1,112 +1,86 @@
 import pandas as pd
 import logging
-from typing import Dict, List, Optional
 import os
+from pathlib import Path
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 class ProductNameMapper:
-    def __init__(self, csv_path: str = '/mnt/data/productname.csv'):
-        """
-        Initialize the ProductNameMapper with a CSV file containing product ID to name mapping.
-        
-        Args:
-            csv_path (str): Path to the CSV file containing product ID and name mapping
-        """
+    def __init__(self, csv_path='data/productname.csv'):
         self.csv_path = csv_path
-        self.product_map: Dict[str, str] = {}
-        self.missing_ids: set = set()  # Track missing IDs to avoid excessive logging
+        self._mapping = {}
         self._load_mapping()
 
-    def _load_mapping(self) -> None:
-        """
-        Load the product mapping from CSV file.
-        Handles missing files and invalid data gracefully.
-        """
+    def _load_mapping(self):
+        """Load product ID to name mapping from CSV file."""
         try:
-            if not os.path.exists(self.csv_path):
-                logger.error(f"Product mapping file {self.csv_path} not found.")
+            # Try different possible paths
+            paths_to_try = [
+                self.csv_path,
+                f"/app/{self.csv_path}",
+                "/mnt/data/productname.csv"
+            ]
+
+            csv_path = None
+            for path in paths_to_try:
+                if os.path.exists(path):
+                    csv_path = path
+                    break
+
+            if csv_path is None:
+                logger.error(f"Product name CSV not found in any of these locations: {paths_to_try}")
                 return
 
-            # Read CSV file
-            df = pd.read_csv(self.csv_path)
+            df = pd.read_csv(csv_path, dtype={'product_id': str, 'product_name': str})
             
             # Ensure required columns exist
-            required_columns = ['ProductID', 'ProductName']
-            if not all(col in df.columns for col in required_columns):
-                logger.error(f"CSV file must contain columns: {required_columns}")
-                return
+            if 'product_id' not in df.columns or 'product_name' not in df.columns:
+                # Try to adapt to different column names
+                if 'ProductID' in df.columns and 'ProductName' in df.columns:
+                    df = df.rename(columns={'ProductID': 'product_id', 'ProductName': 'product_name'})
+                else:
+                    logger.error("CSV file must contain 'product_id' and 'product_name' columns")
+                    return
 
-            # Clean and validate data
-            df = df.dropna(subset=['ProductID', 'ProductName'])  # Remove rows with missing values
-            df['ProductID'] = df['ProductID'].astype(str).str.upper()  # Convert IDs to uppercase strings
+            # Clean data
+            df['product_id'] = df['product_id'].astype(str).str.strip()
+            df['product_name'] = df['product_name'].astype(str).str.strip()
+
+            # Create mapping
+            self._mapping = dict(zip(df['product_id'], df['product_name']))
+            logger.info(f"Loaded {len(self._mapping)} product names from {csv_path}")
             
-            # Create mapping dictionary
-            self.product_map = dict(zip(df['ProductID'], df['ProductName']))
-            logger.info(f"Successfully loaded {len(self.product_map)} product mappings from CSV")
-            
-            # Log a few sample mappings for verification
-            sample_items = list(self.product_map.items())[:3]
-            logger.info(f"Sample mappings: {sample_items}")
-            
-        except FileNotFoundError:
-            logger.error(f"Product name mapping CSV not found at: {self.csv_path}")
-        except pd.errors.EmptyDataError:
-            logger.error("CSV file is empty")
+            # Log sample for verification
+            sample = dict(list(self._mapping.items())[:3])
+            logger.info(f"Sample mappings: {sample}")
+
         except Exception as e:
-            logger.error(f"Error loading product mapping: {str(e)}")
-            self.product_map = {}
+            logger.error(f"Error loading product names: {str(e)}")
+            self._mapping = {}
 
-    def get_name(self, product_id: str) -> str:
-        """
-        Get the product name for a given product ID.
-        Returns the original ID if not found in mapping.
+    def get_name(self, product_id):
+        """Get product name for a given product ID."""
+        if not product_id:
+            return None
         
-        Args:
-            product_id (str): The product ID to look up
-            
-        Returns:
-            str: The product name if found, otherwise the original ID
-        """
-        try:
-            product_id = str(product_id).upper()  # Convert to uppercase string for consistent lookup
-            if product_id not in self.product_map and product_id not in self.missing_ids:
-                self.missing_ids.add(product_id)  # Track this missing ID
-                logger.warning(f"Product ID not found in mapping: {product_id}")
-            return self.product_map.get(product_id, product_id)  # Return original ID if not found
-        except Exception as e:
-            logger.error(f"Error getting product name for ID {product_id}: {str(e)}")
-            return product_id  # Return original ID on error
+        product_id = str(product_id).strip()
+        name = self._mapping.get(product_id)
+        if not name:
+            logger.warning(f"No name found for product ID: {product_id}")
+            return product_id  # Return ID as fallback
+        return name
 
-    def get_names_batch(self, product_ids: List[str]) -> List[str]:
-        """
-        Get product names for multiple product IDs efficiently.
-        
-        Args:
-            product_ids (List[str]): List of product IDs to look up
-            
-        Returns:
-            List[str]: List of product names (or original IDs if not found)
-        """
-        try:
-            if not isinstance(product_ids, list):
-                logger.error(f"Invalid input type for get_names_batch: {type(product_ids)}")
-                return product_ids
-            return [self.get_name(pid) for pid in product_ids]
-        except Exception as e:
-            logger.error(f"Error in batch name lookup: {str(e)}")
-            return product_ids  # Return original IDs on error
+    def get_names_batch(self, product_ids):
+        """Get product names for a list of product IDs."""
+        if not product_ids:
+            return []
+        return [self.get_name(pid) for pid in product_ids]
 
-    def get_mapping(self) -> Dict[str, str]:
-        """
-        Get the complete product ID to name mapping.
-        
-        Returns:
-            Dict[str, str]: Dictionary mapping product IDs to names
-        """
-        return self.product_map.copy()
+    def get_mapping(self):
+        """Return a copy of the complete product ID to name mapping."""
+        return self._mapping.copy()
 
 # Create a singleton instance
-product_mapper = ProductNameMapper() 
+product_name_mapper = ProductNameMapper() 

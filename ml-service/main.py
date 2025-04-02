@@ -13,12 +13,16 @@ from datetime import datetime
 import gc
 import traceback
 import sys
-from product_names import product_mapper, ProductNameMapper
+from product_names import product_name_mapper
 import logging
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="Market Basket Analysis API",
-    description="ML Microservice for Market Basket Analysis using Apriori Algorithm optimized for large datasets"
+    description="ML Microservice for Market Basket Analysis using Apriori Algorithm"
 )
 
 # Enable CORS
@@ -30,10 +34,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Initialize product name mapper
-product_mapper = ProductNameMapper('/mnt/data/productname.csv')
+# Global variables
+model_data = None
+transactions_df = None
+frequent_itemsets = None
+rules = None
 
-# Models
 class TransactionItem(BaseModel):
     item_id: str
     item_name: Optional[str] = None
@@ -55,43 +61,25 @@ class TrainingRequest(BaseModel):
     use_sample_data: Optional[bool] = True
     max_length: Optional[int] = None
 
-# Global variables
-model_data = None
-transaction_data = None
-rules_data = None
-last_training_time = None
-
 # Helper functions
-def process_transaction_data(header_file, detail_file):
+def process_transaction_data(header_file: str, detail_file: str, sample_size: Optional[int] = None) -> pd.DataFrame:
     """Process transaction data from header and detail files"""
     try:
-        # Read data files
-        header_df = pd.read_csv(header_file)
-        detail_df = pd.read_csv(detail_file)
-        
-        print(f"Headers shape: {header_df.shape}, Details shape: {detail_df.shape}")
-        print(f"Header columns: {header_df.columns.tolist()}")
-        print(f"Detail columns: {detail_df.columns.tolist()}")
+        # Read data files with optional sampling
+        header_df = pd.read_csv(header_file, nrows=sample_size)
+        detail_df = pd.read_csv(detail_file, nrows=sample_size)
         
         # Merge datasets on voucher_id
         merged_df = pd.merge(detail_df, header_df, on='voucher_id', how='inner')
-        print(f"Merged shape: {merged_df.shape}")
         
-        # Ensure item_no is a string for consistent processing
-        if merged_df['item_no'].dtype != 'object':
-            merged_df['item_no'] = merged_df['item_no'].astype(str)
+        # Ensure item_no is a string
+        merged_df['item_no'] = merged_df['item_no'].astype(str)
         
         # Group by voucher_id and collect item_no into lists
         transactions = merged_df.groupby('voucher_id')['item_no'].apply(list).reset_index()
-        print(f"Transactions count: {len(transactions)}")
-        
-        # Take a sample of the transactions for debugging
-        sample_txn = transactions.iloc[:5]
-        print(f"Sample transactions: {sample_txn.to_dict()}")
         
         return transactions
     except Exception as e:
-        print(f"Error processing data: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error processing data: {str(e)}")
 
 def process_large_transaction_data(header_file, detail_file, chunk_size=100000):
@@ -153,50 +141,33 @@ def process_large_transaction_data(header_file, detail_file, chunk_size=100000):
         print(f"Error processing large transaction data: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error processing large transaction data: {str(e)}")
 
-def train_model(transactions, min_support=0.01, max_length=None):
-    """Train market basket analysis model using Apriori algorithm optimized for large datasets"""
+def train_model(transactions: pd.DataFrame, min_support: float = 0.01, max_length: int = 3):
+    """Train market basket analysis model using Apriori algorithm"""
     try:
         # Prepare transaction data
         te = TransactionEncoder()
         te_ary = te.fit(transactions['item_no']).transform(transactions['item_no'])
         df = pd.DataFrame(te_ary, columns=te.columns_)
-
-        # For large datasets, we need to clear memory aggressively
         del te_ary
         gc.collect()
         
-        print(f"Unique items count: {len(te.columns_)}")
-        print(f"Transaction matrix shape: {df.shape}")
-        
-        # Use Apriori algorithm for better memory efficiency
-        print("Training model using Apriori algorithm...")
+        # Generate frequent itemsets
         frequent_itemsets = apriori(
             df, 
             min_support=min_support, 
             use_colnames=True,
-            max_len=max_length or 3  # Limit itemset size for large datasets
+            max_len=max_length
         )
-        
-        print(f"Frequent itemsets generated: {len(frequent_itemsets)}")
-        if len(frequent_itemsets) > 0:
-            print(f"Sample itemset: {frequent_itemsets.iloc[0]}")
         
         return frequent_itemsets, te.columns_
-    except MemoryError:
-        raise HTTPException(
-            status_code=500, 
-            detail="Memory error during model training. Try increasing min_support or reducing max_length."
-        )
     except Exception as e:
-        print(f"Error training model: {str(e)}")
         raise HTTPException(status_code=500, detail=f"Error training model: {str(e)}")
 
 def generate_association_rules(frequent_itemsets, min_threshold=0.5):
     """Generate association rules from frequent itemsets"""
     try:
         rules = association_rules(frequent_itemsets, metric="confidence", min_threshold=min_threshold)
-        rules = rules.sort_values(['confidence', 'lift'], ascending=[False, False])
-        return rules
+        return rules.sort_values(['confidence', 'lift'], ascending=[False, False])
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error generating rules: {str(e)}")
 
@@ -230,7 +201,7 @@ def get_recommendations(items, rules, top_n=5):
                 if item not in recommended_items and item not in items:
                     recommended_items.append({
                         'item_id': item,
-                        'name': product_mapper.get_name(item),
+                        'name': product_name_mapper.get_name(item),
                         'confidence': float(rule['confidence']),
                         'lift': float(rule['lift']),
                         'support': float(rule['support'])
@@ -244,26 +215,26 @@ def get_recommendations(items, rules, top_n=5):
 # API Endpoints
 @app.get("/")
 def read_root():
-    return {"message": "Market Basket Analysis ML Microservice", "status": "active"}
+    return {"message": "Market Basket Analysis ML Service", "status": "active"}
 
 @app.get("/status")
 def get_status():
-    global model_data, transaction_data, rules_data, last_training_time
+    global model_data, transactions_df, rules, frequent_itemsets
     
     # Calculate additional statistics if transaction data is available
     unique_items_count = 0
     avg_basket_size = 0
     avg_basket_value = 0
     
-    if transaction_data is not None:
+    if transactions_df is not None:
         # Get unique items
         all_items = []
-        for _, row in transaction_data.iterrows():
+        for _, row in transactions_df.iterrows():
             all_items.extend(row['item_no'])
         unique_items_count = len(set(all_items))
         
         # Calculate average basket size
-        basket_sizes = transaction_data['item_no'].apply(len)
+        basket_sizes = transactions_df['item_no'].apply(len)
         avg_basket_size = float(basket_sizes.mean()) if len(basket_sizes) > 0 else 0
         
         # Average basket value is estimated (not actual price data in this demo)
@@ -271,9 +242,9 @@ def get_status():
     
     return {
         "model_trained": model_data is not None,
-        "transactions_count": len(transaction_data) if transaction_data is not None else 0,
-        "rules_count": len(rules_data) if rules_data is not None else 0,
-        "last_training_time": last_training_time,
+        "transactions_count": len(transactions_df) if transactions_df is not None else 0,
+        "rules_count": len(rules) if rules is not None else 0,
+        "frequent_itemsets_count": len(frequent_itemsets) if frequent_itemsets is not None else 0,
         "unique_items_count": unique_items_count,
         "avg_basket_size": avg_basket_size,
         "avg_basket_value": avg_basket_value
@@ -281,92 +252,51 @@ def get_status():
 
 @app.post("/train")
 def train_model_endpoint(request: TrainingRequest = Body(...)):
-    global model_data, transaction_data, rules_data, last_training_time
+    """Train the market basket analysis model"""
+    global model_data, transactions_df, rules, frequent_itemsets
     
     try:
-        # Dataset files are always in the data directory
+        # Dataset files
         header_file = "data/Header_comb.csv"
         detail_file = "data/Detail_comb.csv"
         
-        # Check if files exist
         if not os.path.exists(header_file) or not os.path.exists(detail_file):
             raise HTTPException(status_code=404, detail="Data files not found")
         
-        # Process transaction data based on data size
-        print(f"Starting data processing with use_sample_data={request.use_sample_data}")
-        if not request.use_sample_data:
-            # Use chunking process for large datasets
-            print("Using chunked processing for large dataset")
-            # Set a higher chunk size for faster processing but still memory efficient
-            chunk_size = 200000
-            transaction_data = process_large_transaction_data(header_file, detail_file, chunk_size)
-        else:
-            # Standard processing for smaller datasets - this will load a subset
-            print("Using standard processing with sample data")
-            # Read only the first N rows to create a manageable sample
-            sample_size = 500000  # Adjust based on your memory constraints
-            header_sample = pd.read_csv(header_file, nrows=sample_size)
-            detail_sample = pd.read_csv(detail_file, nrows=sample_size)
-            
-            # Save samples temporarily to process with the regular function
-            header_sample.to_csv("data/header_sample.csv", index=False)
-            detail_sample.to_csv("data/detail_sample.csv", index=False)
-            
-            # Process the samples
-            transaction_data = process_transaction_data("data/header_sample.csv", "data/detail_sample.csv")
-            
-            # Clean up temporary files
-            if os.path.exists("data/header_sample.csv"):
-                os.remove("data/header_sample.csv")
-            if os.path.exists("data/detail_sample.csv"):
-                os.remove("data/detail_sample.csv")
+        # Process transaction data
+        sample_size = 500000 if request.use_sample_data else None
+        transactions_df = process_transaction_data(header_file, detail_file, sample_size)
         
-        # Train model using Apriori with optimized parameters for dataset size
-        print("Starting model training...")
-        min_support_value = request.min_support
-        
-        # If using large dataset, adjust min_support to be more restrictive
-        if not request.use_sample_data and min_support_value < 0.01:
-            print(f"Adjusting min_support from {min_support_value} to 0.01 for large dataset")
-            min_support_value = 0.01  # Set a higher min_support for large datasets
-        
-        # Limit max_length to control memory usage
-        max_length_value = request.max_length or 3
-        if not request.use_sample_data and max_length_value > 3:
-            print(f"Limiting max_length from {max_length_value} to 3 for large dataset")
-            max_length_value = 3  # Limit for large datasets
-            
+        # Train model
         frequent_itemsets, columns = train_model(
-            transaction_data, 
-            min_support=min_support_value,
-            max_length=max_length_value
+            transactions_df, 
+            min_support=request.min_support,
+            max_length=request.max_length or 3
         )
         
+        # Store model data
         model_data = {
             "frequent_itemsets": frequent_itemsets,
-            "columns": list(columns)
+            "columns": columns,
+            "transaction_count": len(transactions_df)
         }
         
         # Generate association rules
-        print("Generating association rules...")
-        rules_data = generate_association_rules(frequent_itemsets, min_threshold=request.min_threshold)
+        rules = generate_association_rules(frequent_itemsets, min_threshold=request.min_threshold)
         
-        # Update training time
-        last_training_time = datetime.now().isoformat()
+        print(f"Model trained successfully with {len(frequent_itemsets)} itemsets and {len(rules)} rules")
         
         return {
             "status": "success",
             "message": "Model trained successfully",
-            "transactions_count": len(transaction_data),
-            "frequent_itemsets_count": len(frequent_itemsets),
-            "rules_count": len(rules_data),
-            "training_time": last_training_time
+            "transactions_count": len(transactions_df),
+            "rules_count": len(rules)
         }
     
     except Exception as e:
         print(f"Error in train_model: {str(e)}")
         traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Error training model: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/frequent-itemsets")
 def get_frequent_itemsets(limit: Optional[int] = None, min_support: Optional[float] = None) -> Dict[str, Any]:
@@ -391,13 +321,13 @@ def get_frequent_itemsets(limit: Optional[int] = None, min_support: Optional[flo
                 itemset_products = list(row['itemsets'])
                 formatted_itemset = {
                     'itemset': itemset_products,  # Keep original IDs
-                    'product_names': product_mapper.get_names_batch(itemset_products),  # Add names
+                    'product_names': product_name_mapper.get_names_batch(itemset_products),  # Add names
                     'support': float(row['support'])
                 }
                 
                 # For single-item sets, add name for top products display
                 if len(itemset_products) == 1:
-                    formatted_itemset['name'] = product_mapper.get_name(itemset_products[0])
+                    formatted_itemset['name'] = product_name_mapper.get_name(itemset_products[0])
                 
                 formatted_itemsets.append(formatted_itemset)
             except Exception as item_error:
@@ -421,16 +351,16 @@ def get_frequent_itemsets(limit: Optional[int] = None, min_support: Optional[flo
 @app.get("/rules")
 def get_rules(limit: Optional[int] = None, min_confidence: Optional[float] = None, min_lift: Optional[float] = None) -> Dict[str, Any]:
     """Get association rules with product names."""
-    global model_data, rules_data
+    global model_data, rules
     
-    if model_data is None or rules_data is None:
+    if model_data is None or rules is None:
         raise HTTPException(status_code=400, detail="Model not trained. Please train the model first.")
     
     try:
         # Filter rules based on confidence and lift
-        filtered_rules = rules_data[
-            (rules_data['confidence'] >= min_confidence if min_confidence is not None else True) &
-            (rules_data['lift'] >= min_lift if min_lift is not None else True)
+        filtered_rules = rules[
+            (rules['confidence'] >= min_confidence if min_confidence is not None else True) &
+            (rules['lift'] >= min_lift if min_lift is not None else True)
         ]
         
         # Format rules with product names
@@ -441,8 +371,8 @@ def get_rules(limit: Optional[int] = None, min_confidence: Optional[float] = Non
                 consequents = list(rule['consequents'])
                 
                 formatted_rule = {
-                    'antecedents': product_mapper.get_names_batch(antecedents),  # Use names directly
-                    'consequents': product_mapper.get_names_batch(consequents),  # Use names directly
+                    'antecedents': product_name_mapper.get_names_batch(antecedents),  # Use names directly
+                    'consequents': product_name_mapper.get_names_batch(consequents),  # Use names directly
                     'support': float(rule['support']),
                     'confidence': float(rule['confidence']),
                     'lift': float(rule['lift'])
@@ -473,23 +403,23 @@ def get_rules(limit: Optional[int] = None, min_confidence: Optional[float] = Non
 @app.post("/recommend")
 def get_item_recommendations(request: RecommendationRequest):
     """Get product recommendations with names."""
-    global model_data, rules_data
+    global model_data, rules
     
-    if model_data is None or rules_data is None:
+    if model_data is None or rules is None:
         raise HTTPException(status_code=400, detail="Model not trained. Please train the model first.")
     
     try:
         # Get recommendations
         recommendations = []
         try:
-            raw_recommendations = get_recommendations(request.items, rules_data)
+            raw_recommendations = get_recommendations(request.items, rules)
             
             # Add product names to recommendations
             for rec in raw_recommendations:
                 try:
                     recommendations.append({
                         'id': rec['item_id'],
-                        'name': product_mapper.get_name(rec['item_id']),
+                        'name': product_name_mapper.get_name(rec['item_id']),
                         'confidence': float(rec['confidence']),
                         'lift': float(rec['lift']),
                         'support': float(rec['support'])
@@ -504,7 +434,7 @@ def get_item_recommendations(request: RecommendationRequest):
         return {
             "status": "success",
             "input_items": request.items,
-            "input_names": product_mapper.get_names_batch(request.items),
+            "input_names": product_name_mapper.get_names_batch(request.items),
             "recommendations": recommendations
         }
     except Exception as e:
@@ -519,17 +449,17 @@ def get_item_recommendations(request: RecommendationRequest):
 
 @app.post("/simulate")
 def simulate_transaction(transaction: Transaction):
-    global model_data, rules_data
+    global model_data, rules
     
     # Check if model is trained
-    if model_data is None or rules_data is None:
+    if model_data is None or rules is None:
         raise HTTPException(status_code=400, detail="Model not trained. Please train the model first.")
     
     # Extract item IDs
     item_ids = [item.item_id for item in transaction.items]
     
     # Get recommendations
-    recommendations = get_recommendations(item_ids, rules_data)
+    recommendations = get_recommendations(item_ids, rules)
     
     return {
         "status": "success",
@@ -539,99 +469,75 @@ def simulate_transaction(transaction: Transaction):
     }
 
 @app.get("/dashboard")
-def get_dashboard_data() -> Dict[str, Any]:
-    """Get dashboard data with product names and metrics."""
-    global model_data, transaction_data, rules_data, last_training_time
-    
+async def get_dashboard_data():
+    """Get dashboard data including metrics and top products/combinations."""
     try:
-        # Check if model is trained
-        if model_data is None or transaction_data is None:
-            raise HTTPException(
-                status_code=400,
-                detail="Model not trained. Please train the model first."
-            )
-        
-        # Get top products (single-item frequent itemsets)
-        frequent_itemsets = model_data["frequent_itemsets"]
-        single_item_sets = frequent_itemsets[frequent_itemsets['itemsets'].apply(len) == 1]
-        
-        # Calculate transaction count for frequency
-        transaction_count = len(transaction_data)
-        
-        # Format top products with names and transaction counts
+        if transactions_df is None or frequent_itemsets is None or rules is None:
+            return {
+                "status": "success",
+                "data": {
+                    "metrics": {
+                        "total_transactions": 0,
+                        "unique_products": 0,
+                        "avg_basket_size": 0,
+                        "avg_basket_value": 0
+                    },
+                    "top_products": [],
+                    "top_combinations": []
+                }
+            }
+
+        # Calculate basic metrics
+        metrics = {
+            "total_transactions": len(transactions_df),
+            "unique_products": len(pd.unique(transactions_df['item_no'].explode())),
+            "avg_basket_size": transactions_df['item_no'].apply(len).mean(),
+            "avg_basket_value": transactions_df['quantity'].sum() if 'quantity' in transactions_df else 0
+        }
+
+        # Get top products
         top_products = []
-        for _, row in single_item_sets.sort_values('support', ascending=False).head(5).iterrows():
-            try:
-                product_id = list(row['itemsets'])[0]
-                product_name = product_mapper.get_name(product_id)  # Uses CSV mapping with fallback
-                transactions = int(row['support'] * transaction_count)
+        single_items = frequent_itemsets[frequent_itemsets['itemsets'].apply(len) == 1]
+        if not single_items.empty:
+            for _, row in single_items.nlargest(5, 'support').iterrows():
+                item_id = list(row['itemsets'])[0]
+                product_name = product_name_mapper.get_name(item_id)
+                transactions = int(row['support'] * len(transactions_df))
                 top_products.append({
-                    'id': product_id,
-                    'name': product_name,
-                    'transactions': transactions
+                    "id": item_id,
+                    "name": product_name,
+                    "transactions": transactions
                 })
-            except Exception as product_error:
-                logger.error(f"Error formatting top product {product_id}: {str(product_error)}")
-                continue
-        
-        # Get top combinations (rules with highest confidence)
+
+        # Get top combinations
         top_combinations = []
-        if rules_data is not None:
-            try:
-                for _, rule in rules_data.sort_values(['confidence', 'lift'], ascending=[False, False]).head(5).iterrows():
-                    try:
-                        combination = {
-                            'antecedents': product_mapper.get_names_batch(list(rule['antecedents'])),
-                            'consequents': product_mapper.get_names_batch(list(rule['consequents'])),
-                            'support': float(rule['support']),
-                            'confidence': float(rule['confidence']),
-                            'lift': float(rule['lift'])
-                        }
-                        top_combinations.append(combination)
-                    except Exception as rule_error:
-                        logger.error(f"Error formatting rule: {str(rule_error)}")
-                        continue
-            except Exception as rules_error:
-                logger.error(f"Error processing rules: {str(rules_error)}")
-        
-        # Calculate metrics
-        unique_items = set()
-        basket_sizes = []
-        for _, row in transaction_data.iterrows():
-            items = row['item_no']
-            unique_items.update(items)
-            basket_sizes.append(len(items))
-        
-        avg_basket_size = sum(basket_sizes) / len(basket_sizes) if basket_sizes else 0
-        avg_basket_value = avg_basket_size * 15.0  # Estimated average price per item
-        
+        if not rules.empty:
+            for _, rule in rules.nlargest(5, 'lift').iterrows():
+                antecedents = [product_name_mapper.get_name(pid) for pid in rule['antecedents']]
+                consequents = [product_name_mapper.get_name(pid) for pid in rule['consequents']]
+                
+                top_combinations.append({
+                    "antecedents": antecedents,
+                    "consequents": consequents,
+                    "support": rule['support'],
+                    "confidence": rule['confidence'],
+                    "lift": rule['lift']
+                })
+
         return {
             "status": "success",
             "data": {
+                "metrics": metrics,
                 "top_products": top_products,
-                "top_combinations": top_combinations,
-                "metrics": {
-                    "total_transactions": transaction_count,
-                    "unique_products": len(unique_items),
-                    "avg_basket_size": round(avg_basket_size, 2),
-                    "avg_basket_value": round(avg_basket_value, 2),
-                    "last_training_time": last_training_time
-                }
+                "top_combinations": top_combinations
             }
         }
-        
-    except HTTPException as he:
-        # Re-raise HTTP exceptions
-        raise he
+
     except Exception as e:
-        logger.error(f"Error generating dashboard data: {str(e)}")
-        logger.error(traceback.format_exc())  # Log full traceback
+        logger.error(f"Error getting dashboard data: {str(e)}")
         raise HTTPException(
             status_code=500,
-            detail={
-                "error": "Error generating dashboard data",
-                "message": str(e)
-            }
+            detail={"message": "Failed to get dashboard data", "error": str(e)}
         )
 
 if __name__ == "__main__":
