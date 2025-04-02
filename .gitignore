@@ -1,120 +1,12 @@
-# Dataset and Large Files
+# Ignore CSV files
 *.csv
-*.xlsx
-*.xls
-*.json
-*.pkl
-*.zip
-*.tar.gz
-*.parquet
-data/
-datasets/
-/mnt/data/
 
-# Python Virtual Environments and Cache
-venv/
-.venv/
-env/
-.env/
-__pycache__/
-*.py[cod]
-*$py.class
-.Python
-.pytest_cache/
-.coverage
-htmlcov/
-.tox/
-
-# Frontend Dependencies and Build
+# Ignore Node.js dependencies
 node_modules/
-dist/
-build/
-.next/
-.nuxt/
-.cache/
-.parcel-cache/
-.npm
-.yarn/
-coverage/
-.env.local
-.env.development.local
-.env.test.local
-.env.production.local
-npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
+frontend/node_modules/
+backend/node_modules/
 
-# Environment Files
-.env
-.env.*
-!.env.example
-
-# IDE and Editor Files
-.idea/
-.vscode/
-*.swp
-*.swo
-*.swn
-*.bak
-*.sublime-workspace
-*.sublime-project
-
-# Logs and Temporary Files
-*.log
-*.tmp
-logs/
-temp/
-tmp/
-
-# System Files
-.DS_Store
-Thumbs.db
-.directory
-Desktop.ini
-*.lnk
-
-# Docker
-.docker/
-docker-compose.override.yml
-*.env.docker
-
-# ML Model Files and Artifacts
-models/
-*.h5
-*.onnx
-*.pt
-*.pth
-*.model
-*.joblib
-*.pickle
-model_checkpoints/
-
-# Database Files
-*.db
-*.sqlite
-*.sqlite3
-
-# Testing and Coverage
-.coverage
-coverage/
-.pytest_cache/
-test-results/
-cypress/videos/
-cypress/screenshots/
-
-# Documentation Build
-docs/_build/
-site/
-_site/
-
-# Misc
-*.bak
-*.swp
-*.swo
-*~
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
-Thumbs.db 
+# Ignore package-lock files
+package-lock.json
+frontend/package-lock.json
+backend/package-lock.json 

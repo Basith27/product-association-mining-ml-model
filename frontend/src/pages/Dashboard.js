@@ -1,7 +1,7 @@
 import React, { useEffect, useState } from 'react';
-import { Box, Typography, Grid, Paper, Chip, CircularProgress } from '@mui/material';
+import { Box, Typography, Grid, Paper, Chip, CircularProgress, Alert } from '@mui/material';
 import { styled } from '@mui/material/styles';
-import { API_BASE_URL } from '../config';
+import { ML_SERVICE_URL } from '../config';
 
 const StyledPaper = styled(Paper)(({ theme }) => ({
   padding: theme.spacing(3),
@@ -51,10 +51,16 @@ const Dashboard = () => {
       setLoading(true);
       setError(null);
       
-      const response = await fetch(`${API_BASE_URL}/dashboard`);
+      const response = await fetch(`${ML_SERVICE_URL}/dashboard`, {
+        method: 'GET',
+        headers: {
+          'Accept': 'application/json'
+        }
+      });
+
       if (!response.ok) {
         const errorData = await response.json();
-        throw new Error(errorData.detail?.message || 'Failed to fetch dashboard data');
+        throw new Error(errorData.detail?.message || `HTTP error! status: ${response.status}`);
       }
       
       const data = await response.json();
@@ -65,7 +71,7 @@ const Dashboard = () => {
       }
     } catch (err) {
       console.error('Error fetching dashboard data:', err);
-      setError(err.message);
+      setError(err.message || 'Failed to fetch dashboard data');
     } finally {
       setLoading(false);
     }
@@ -81,16 +87,27 @@ const Dashboard = () => {
 
   if (error) {
     return (
-      <Box display="flex" justifyContent="center" alignItems="center" minHeight="400px">
-        <Typography color="error">Error: {error}</Typography>
+      <Box p={3}>
+        <Alert 
+          severity="error" 
+          action={
+            <button onClick={fetchDashboardData}>
+              Retry
+            </button>
+          }
+        >
+          {error}
+        </Alert>
       </Box>
     );
   }
 
   if (!dashboardData) {
     return (
-      <Box display="flex" justifyContent="center" alignItems="center" minHeight="400px">
-        <Typography>No data available. Please train the model first.</Typography>
+      <Box p={3}>
+        <Alert severity="info">
+          No data available. Please train the model first.
+        </Alert>
       </Box>
     );
   }
